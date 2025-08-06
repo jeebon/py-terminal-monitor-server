@@ -1,5 +1,3 @@
-import os
-from pathlib import Path
 import uuid
 import socket
 import logging
@@ -13,25 +11,13 @@ import threading
 import time
 import requests
 import json
-from dotenv import load_dotenv
-
-## load dotenv current directory .env
-parent_dir = Path(__file__).resolve().parent
-env_path = parent_dir / ".env"
-load_dotenv(dotenv_path=env_path, override=True)
-print(f"env_path: {env_path}")
+from config import Config, DATABASE_URL, SLACK_WEBHOOK_URL, PORT, HEARTBEAT_CHECK_INTERVAL, STALE_INSTANCE_THRESHOLD, MAX_NOTIFICATION_COUNT
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Configuration
-SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL', 'https://hooks.slack.com/services/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')
-MONITORING_DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres@localhost:5432/credoiq_db')
-PORT = int(os.getenv('PORT', 5001))
-print(f"Using database URL: {MONITORING_DATABASE_URL}, {SLACK_WEBHOOK_URL}")
 
 @dataclass
 class InstanceInfo:
@@ -186,9 +172,9 @@ class DatabaseManager:
                         SELECT * FROM monitoring_instances 
                         WHERE status = 'running' 
                         AND last_heartbeat < %s 
-                        AND notification_count < 3
+                        AND notification_count < %s
                         ORDER BY last_heartbeat ASC
-                    ''', (datetime.now() - timedelta(minutes=minutes),))
+                    ''', (datetime.now() - timedelta(minutes=minutes), MAX_NOTIFICATION_COUNT))
                     return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Error fetching stale instances: {e}")
@@ -299,8 +285,8 @@ class HeartbeatMonitor:
         """Main monitoring loop"""
         while self.running:
             try:
-                # Check for stale instances (no heartbeat in 10 minutes)
-                stale_instances = self.db_manager.get_stale_instances(minutes=10)
+                # Check for stale instances using configured threshold
+                stale_instances = self.db_manager.get_stale_instances(minutes=STALE_INSTANCE_THRESHOLD)
                 
                 for instance in stale_instances:
                     instance_id = instance['instance_id']
@@ -308,29 +294,29 @@ class HeartbeatMonitor:
                     hostname = instance['hostname']
                     notification_count = instance['notification_count']
                     
-                    if notification_count < 3:
+                    if notification_count < MAX_NOTIFICATION_COUNT:
                         # Send notification and increment count
-                        message = f"⚠️ Instance {instance_id} (scrapper: {scrapper_key}) on {hostname} has not sent heartbeat for 10+ minutes"
+                        message = f"⚠️ Instance {instance_id} (scrapper: {scrapper_key}) on {hostname} has not sent heartbeat for {STALE_INSTANCE_THRESHOLD}+ minutes"
                         self.slack_notifier.send_notification(message, "warning")
                         self.db_manager.increment_notification_count(instance_id)
                         logger.warning(f"Sent heartbeat warning for {instance_id} (count: {notification_count + 1})")
                     
-                    elif notification_count >= 3:
-                        # Mark as crashed after 3 notifications
+                    elif notification_count >= MAX_NOTIFICATION_COUNT:
+                        # Mark as crashed after max notifications
                         self.db_manager.mark_as_crashed(instance_id)
                         message = f"🔴 Instance {instance_id} (scrapper: {scrapper_key}) on {hostname} marked as crashed - no heartbeat received"
                         self.slack_notifier.send_notification(message, "danger")
-                        logger.error(f"Marked {instance_id} as crashed after 3 notifications")
+                        logger.error(f"Marked {instance_id} as crashed after {MAX_NOTIFICATION_COUNT} notifications")
                 
-                # Sleep for 5 minutes before next check
-                time.sleep(300)
+                # Sleep for configured interval before next check
+                time.sleep(HEARTBEAT_CHECK_INTERVAL)
                 
             except Exception as e:
                 logger.error(f"Error in heartbeat monitor: {e}")
                 time.sleep(60)  # Sleep for 1 minute on error
 
 # Initialize components
-db_manager = DatabaseManager(MONITORING_DATABASE_URL)
+db_manager = DatabaseManager(DATABASE_URL)
 slack_notifier = SlackNotifier(SLACK_WEBHOOK_URL)
 heartbeat_monitor = HeartbeatMonitor(db_manager, slack_notifier)
 
@@ -530,12 +516,5 @@ def health_check():
     }), 200
 
 
-if __name__ == '__main__':
-    # Start heartbeat monitor
-    heartbeat_monitor.start()
-    
-    try:
-        app.run(host='0.0.0.0', port=PORT, debug=True)
-    finally:
-        # Stop heartbeat monitor on exit
-        heartbeat_monitor.stop()
+# Initialize heartbeat monitor (will be started by main.py or waitress_server.py)
+# heartbeat_monitor is exported for use by main.py and waitress_server.py
