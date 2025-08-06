@@ -16,7 +16,7 @@ import json
 from dotenv import load_dotenv
 
 ## load dotenv current directory .env
-parent_dir = Path(__file__).resolve()
+parent_dir = Path(__file__).resolve().parent
 env_path = parent_dir / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 print(f"env_path: {env_path}")
@@ -528,6 +528,7 @@ def health_check():
         'status': 'healthy',
         'timestamp': datetime.now().isoformat()
     }), 200
+
 
 if __name__ == '__main__':
     # Start heartbeat monitor
